@@ -738,25 +738,56 @@
 		if (target?.tagName === 'A') {
 			const anchor = target as HTMLAnchorElement;
 			const rawHref = anchor.getAttribute('href');
-			if (!rawHref) return;
+			if (!rawHref || rawHref.startsWith('#')) return;
 
-			if (rawHref.startsWith('#')) return;
-			const isMarkdown = ['.md', '.markdown', '.mdown', '.mkd'].some((ext) => {
-				const urlNoHash = rawHref.split('#')[0].split('?')[0];
-				return urlNoHash.toLowerCase().endsWith(ext);
-			});
-
-			if (isMarkdown && !rawHref.match(/^[a-z]+:\/\//i)) {
+			// Markdown links are handled by handleMarkdownBodyClick on <article>
+			// This only handles external links outside the markdown body
+			if (anchor.href && anchor.href.match(/^https?:\/\//i)) {
 				event.preventDefault();
-				const urlNoHash = rawHref.split('#')[0].split('?')[0];
-				const resolved = resolvePath(currentFile, urlNoHash);
-				await loadMarkdown(resolved, { navigate: true });
+				await openUrl(anchor.href);
+			}
+		}
+	}
+
+	async function handleMarkdownBodyClick(event: MouseEvent) {
+		if (mode !== 'app') return;
+		let target = event.target as HTMLElement;
+		while (target && target.tagName !== 'A' && target !== markdownBody)
+			target = target.parentElement as HTMLElement;
+
+		if (target?.tagName === 'A') {
+			const anchor = target as HTMLAnchorElement;
+			const rawHref = anchor.getAttribute('href');
+			if (!rawHref) return;
+			if (rawHref.startsWith('#')) return;
+
+			const isExternal = rawHref.match(/^[a-z]+:\/\//i);
+
+			if (isExternal) {
+				event.preventDefault();
+				event.stopPropagation();
+				openUrl(anchor.href);
 				return;
 			}
 
-			if (anchor.href) {
-				event.preventDefault();
-				await openUrl(anchor.href);
+			// All relative links — resolve locally, never let SvelteKit handle them
+			event.preventDefault();
+			event.stopPropagation();
+			const urlNoHash = decodeURIComponent(rawHref.split('#')[0].split('?')[0]);
+			const resolved = resolvePath(currentFile, urlNoHash);
+
+			try {
+				await invoke('read_file_content', { path: resolved });
+				loadMarkdown(resolved);
+			} catch {
+				const result = await askCustom(
+					`File "${urlNoHash}" was not found. Do you want to create it?`,
+					{ title: 'File Not Found', kind: 'warning' }
+				);
+				if (result === 'discard') {
+					await invoke('save_file_content', { path: resolved, content: '' });
+					loadMarkdown(resolved);
+				}
 			}
 		}
 	}
@@ -1258,7 +1289,8 @@
 
 					<!-- Viewer Pane -->
 					<div class="pane viewer-pane" class:active={!isEditing || isSplit} style="flex: {isSplit ? 1 - tabManager.activeTab.splitRatio : !isEditing ? 1 : 0}">
-						<article bind:this={markdownBody} contenteditable="false" class="markdown-body {isFullWidth ? 'full-width' : ''}" bind:innerHTML={htmlContent} onscroll={handleScroll}>
+						<!-- svelte-ignore a11y_click_events_have_key_events -->
+						<article bind:this={markdownBody} contenteditable="false" class="markdown-body {isFullWidth ? 'full-width' : ''}" bind:innerHTML={htmlContent} onclick={handleMarkdownBodyClick} onscroll={handleScroll}>
 						</article>
 					</div>
 				</div>
