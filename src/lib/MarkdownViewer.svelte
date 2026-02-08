@@ -732,21 +732,10 @@
 	}
 
 	async function handleDocumentClick(event: MouseEvent) {
+		// All markdown body links are handled by handleMarkdownBodyClick (with stopPropagation).
+		// This is kept as a no-op guard to prevent SvelteKit router from navigating on any
+		// stray anchor clicks that might escape (e.g. dynamically injected content).
 		if (mode !== 'app') return;
-		let target = event.target as HTMLElement;
-		while (target && target.tagName !== 'A' && target !== document.body) target = target.parentElement as HTMLElement;
-		if (target?.tagName === 'A') {
-			const anchor = target as HTMLAnchorElement;
-			const rawHref = anchor.getAttribute('href');
-			if (!rawHref || rawHref.startsWith('#')) return;
-
-			// Markdown links are handled by handleMarkdownBodyClick on <article>
-			// This only handles external links outside the markdown body
-			if (anchor.href && anchor.href.match(/^https?:\/\//i)) {
-				event.preventDefault();
-				await openUrl(anchor.href);
-			}
-		}
 	}
 
 	async function handleMarkdownBodyClick(event: MouseEvent) {
@@ -761,28 +750,32 @@
 			if (!rawHref) return;
 			if (rawHref.startsWith('#')) return;
 
-			const isExternal = rawHref.match(/^[a-z]+:\/\//i);
+			event.preventDefault();
+			event.stopPropagation();
 
-			if (isExternal) {
-				event.preventDefault();
-				event.stopPropagation();
+			if (rawHref.match(/^[a-z]+:\/\//i)) {
 				openUrl(anchor.href);
 				return;
 			}
 
-			// All relative links — resolve locally, never let SvelteKit handle them
-			event.preventDefault();
-			event.stopPropagation();
+			// Relative link — resolve against current file and open locally
 			const urlNoHash = decodeURIComponent(rawHref.split('#')[0].split('?')[0]);
 			const resolved = resolvePath(currentFile, urlNoHash);
 
+			// Check if file exists before opening — loadMarkdown swallows errors internally
+			let exists = true;
 			try {
 				await invoke('read_file_content', { path: resolved });
-				loadMarkdown(resolved);
 			} catch {
+				exists = false;
+			}
+
+			if (exists) {
+				loadMarkdown(resolved);
+			} else {
 				const result = await askCustom(
 					`File "${urlNoHash}" was not found. Do you want to create it?`,
-					{ title: 'File Not Found', kind: 'warning' }
+					{ title: 'File Not Found', kind: 'info' }
 				);
 				if (result === 'discard') {
 					await invoke('save_file_content', { path: resolved, content: '' });
