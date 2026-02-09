@@ -26,6 +26,7 @@
 		onprevTab,
 		onundoClose,
 		onscrollsync,
+		onfocused,
 		zoomLevel = $bindable(100),
 		theme = 'system',
 	} = $props<{
@@ -43,6 +44,7 @@
 		onprevTab?: () => void;
 		onundoClose?: () => void;
 		onscrollsync?: (line: number, ratio?: number) => void;
+		onfocused?: () => void;
 		zoomLevel?: number;
 		theme?: 'system' | 'light' | 'dark';
 	}>();
@@ -195,6 +197,10 @@
 		mediaQuery.addEventListener('change', updateTheme);
 
 		editor.focus();
+
+		editor.onDidFocusEditorWidget(() => {
+			onfocused?.();
+		});
 
 		editor.onDidChangeModelContent(() => {
 			const newValue = editor.getValue();

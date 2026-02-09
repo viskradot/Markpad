@@ -9,6 +9,7 @@
 	import Uninstaller from './Uninstaller.svelte';
 	import TitleBar from './components/TitleBar.svelte';
 	import Editor from './components/Editor.svelte';
+	import SearchBar from './components/SearchBar.svelte';
 	import Modal from './components/Modal.svelte';
 
 	import DOMPurify from 'dompurify';
@@ -32,6 +33,17 @@
 
 	let isDragging = $state(false);
 	let isProgrammaticScroll = false;
+
+	// Viewer search state
+	let searchVisible = $state(false);
+	let searchQuery = $state('');
+	let searchCurrentIndex = $state(0);
+	let searchTotalMatches = $state(0);
+	let viewerRanges: Range[] = []; // intentionally non-reactive — Range arrays can be large
+	let activePane = $state<'editor' | 'viewer'>('viewer');
+	let searchDebounceTimer: ReturnType<typeof setTimeout>;
+	let contentResearchTimer: ReturnType<typeof setTimeout>;
+	let searchBarRef: SearchBar | undefined = $state();
 
 	// derived from tab manager
 	let activeTab = $derived(tabManager.activeTab);
@@ -155,6 +167,7 @@
 	$effect(() => {
 		const _ = tabManager.activeTabId;
 		showHome = false;
+		activePane = 'viewer';
 	});
 
 	function processMarkdownHtml(html: string, filePath: string): string {
@@ -815,6 +828,34 @@
 		}
 	});
 
+	// Debounced viewer search on query change
+	$effect(() => {
+		const q = searchQuery;
+		if (!q) {
+			clearViewerSearch();
+			return;
+		}
+		searchDebounceTimer = setTimeout(() => {
+			performViewerSearch(q);
+		}, 150);
+		return () => clearTimeout(searchDebounceTimer);
+	});
+
+	// Re-run search when content changes (tab switch, split re-render)
+	$effect(() => {
+		const _ = htmlContent;
+		const __ = tabManager.activeTabId;
+		untrack(() => {
+			// Clear stale ranges immediately — old DOM is gone
+			clearViewerSearch();
+			if (searchVisible && searchQuery) {
+				// Delay to let DOM update after {#key} block recreates <article>
+				contentResearchTimer = setTimeout(() => performViewerSearch(searchQuery), 250);
+			}
+		});
+		return () => clearTimeout(contentResearchTimer);
+	});
+
 	async function toggleSplitView(tabId: string) {
 		const tab = tabManager.tabs.find((t) => t.id === tabId);
 		if (!tab) return;
@@ -834,6 +875,86 @@
 		} else {
 			tab.isSplit = false;
 		}
+	}
+
+	function performViewerSearch(query: string) {
+		clearViewerSearch();
+		if (!query || !markdownBody) return;
+		if (!('highlights' in CSS)) return;
+
+		const lowerQuery = query.toLowerCase();
+		const walker = document.createTreeWalker(markdownBody, NodeFilter.SHOW_TEXT);
+		const ranges: Range[] = [];
+
+		let node: Text | null;
+		while ((node = walker.nextNode() as Text | null)) {
+			const text = node.textContent || '';
+			const lowerText = text.toLowerCase();
+			let startPos = 0;
+			while (startPos < lowerText.length) {
+				const index = lowerText.indexOf(lowerQuery, startPos);
+				if (index === -1) break;
+				const range = new Range();
+				range.setStart(node, index);
+				range.setEnd(node, index + query.length);
+				ranges.push(range);
+				startPos = index + 1;
+			}
+		}
+
+		viewerRanges = ranges;
+		searchTotalMatches = ranges.length;
+
+		if (ranges.length > 0) {
+			const highlight = new Highlight(...ranges);
+			CSS.highlights.set('search-results', highlight);
+			navigateViewerMatch(0);
+		}
+	}
+
+	function navigateViewerMatch(index: number) {
+		if (viewerRanges.length === 0 || !markdownBody) return;
+		if (!('highlights' in CSS)) return;
+		searchCurrentIndex = index;
+		CSS.highlights.delete('search-current');
+		const currentHighlight = new Highlight(viewerRanges[index]);
+		CSS.highlights.set('search-current', currentHighlight);
+
+		// Precise scroll using Range bounding rect relative to container
+		const range = viewerRanges[index];
+		try {
+			const rect = range.getBoundingClientRect();
+			const containerRect = markdownBody.getBoundingClientRect();
+			const relativeTop = rect.top - containerRect.top + markdownBody.scrollTop;
+			const targetScroll = relativeTop - markdownBody.clientHeight / 2;
+			markdownBody.scrollTo({ top: Math.max(0, targetScroll), behavior: 'smooth' });
+		} catch {
+			// Range may be detached if DOM changed — fallback to parent element
+			const el = range.startContainer.parentElement;
+			if (el) el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+		}
+	}
+
+	function clearViewerSearch() {
+		if ('highlights' in CSS) {
+			CSS.highlights.delete('search-results');
+			CSS.highlights.delete('search-current');
+		}
+		viewerRanges = [];
+		searchTotalMatches = 0;
+		searchCurrentIndex = 0;
+	}
+
+	function findNextInViewer() {
+		if (searchTotalMatches === 0) return;
+		const next = (searchCurrentIndex + 1) % searchTotalMatches;
+		navigateViewerMatch(next);
+	}
+
+	function findPrevInViewer() {
+		if (searchTotalMatches === 0) return;
+		const prev = (searchCurrentIndex - 1 + searchTotalMatches) % searchTotalMatches;
+		navigateViewerMatch(prev);
 	}
 
 	function handleKeyDown(e: KeyboardEvent) {
@@ -887,6 +1008,21 @@
 		if (cmdOrCtrl && key === '0') {
 			e.preventDefault();
 			zoomLevel = 100;
+		}
+		if (cmdOrCtrl && key === 'f') {
+			if (!isEditing || (isSplit && activePane === 'viewer')) {
+				e.preventDefault();
+				if (searchVisible) {
+					searchBarRef?.focusInput();
+				} else {
+					searchVisible = true;
+				}
+			}
+		}
+		if (key === 'escape' && searchVisible) {
+			e.preventDefault();
+			searchVisible = false;
+			clearViewerSearch();
 		}
 	}
 
@@ -1270,7 +1406,8 @@
 								onnextTab={() => tabManager.cycleTab('next')}
 								onprevTab={() => tabManager.cycleTab('prev')}
 								onundoClose={handleUndoCloseTab}
-								onscrollsync={handleEditorScrollSync} />
+								onscrollsync={handleEditorScrollSync}
+								onfocused={() => { activePane = 'editor'; }} />
 						{/if}
 					</div>
 
@@ -1281,9 +1418,19 @@
 					{/if}
 
 					<!-- Viewer Pane -->
-					<div class="pane viewer-pane" class:active={!isEditing || isSplit} style="flex: {isSplit ? 1 - tabManager.activeTab.splitRatio : !isEditing ? 1 : 0}">
+					<div class="pane viewer-pane" class:active={!isEditing || isSplit} style="flex: {isSplit ? 1 - tabManager.activeTab.splitRatio : !isEditing ? 1 : 0}; position: relative;">
+						{#if searchVisible}
+							<SearchBar
+								bind:this={searchBarRef}
+								bind:query={searchQuery}
+								bind:currentIndex={searchCurrentIndex}
+								totalMatches={searchTotalMatches}
+								onclose={() => { searchVisible = false; clearViewerSearch(); }}
+								onfindNext={findNextInViewer}
+								onfindPrev={findPrevInViewer} />
+						{/if}
 						<!-- svelte-ignore a11y_click_events_have_key_events -->
-						<article bind:this={markdownBody} contenteditable="false" class="markdown-body {isFullWidth ? 'full-width' : ''}" bind:innerHTML={htmlContent} onclick={handleMarkdownBodyClick} onscroll={handleScroll}>
+						<article bind:this={markdownBody} contenteditable="false" class="markdown-body {isFullWidth ? 'full-width' : ''}" bind:innerHTML={htmlContent} onclick={(e) => { activePane = 'viewer'; handleMarkdownBodyClick(e); }} onscroll={handleScroll}>
 						</article>
 					</div>
 				</div>
