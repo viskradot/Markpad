@@ -178,7 +178,13 @@
 		for (const img of doc.querySelectorAll('img')) {
 			const src = img.getAttribute('src');
 			if (src && !src.startsWith('http') && !src.startsWith('data:')) {
-				img.setAttribute('src', convertFileSrc(resolvePath(filePath, src)));
+				let decodedSrc: string;
+				try {
+					decodedSrc = decodeURIComponent(src);
+				} catch {
+					decodedSrc = src;
+				}
+				img.setAttribute('src', convertFileSrc(resolvePath(filePath, decodedSrc)));
 			} else if (src && isYoutubeLink(src)) {
 				const videoId = getYoutubeId(src);
 				if (videoId) replaceWithYoutubeEmbed(img, videoId);

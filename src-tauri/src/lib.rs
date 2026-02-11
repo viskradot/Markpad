@@ -23,6 +23,19 @@ async fn show_window(window: tauri::Window) {
     window.show().unwrap();
 }
 
+fn encode_image_paths(content: &str) -> Cow<'_, str> {
+    let re = Regex::new(r"!\[([^\]]*)\]\(([^)]+)\)").unwrap();
+    re.replace_all(content, |caps: &Captures| {
+        let alt = &caps[1];
+        let url = &caps[2];
+        if url.starts_with("http://") || url.starts_with("https://") || url.starts_with("data:") || !url.contains(' ') {
+            return caps[0].to_string();
+        }
+        let encoded = url.replace(' ', "%20");
+        format!("![{}]({})", alt, encoded)
+    })
+}
+
 fn process_obsidian_embeds(content: &str) -> Cow<'_, str> {
     let re = Regex::new(r"!\[\[(.*?)\]\]").unwrap();
     
@@ -32,7 +45,7 @@ fn process_obsidian_embeds(content: &str) -> Cow<'_, str> {
         let path = parts.next().unwrap_or("");
         let size = parts.next();
         
-        let path_escaped = path.replace(" ", "%20");
+        let path_escaped = path.replace("\"", "&quot;");
         
         if let Some(size_str) = size {
             if size_str.contains('x') {
@@ -51,7 +64,8 @@ fn process_obsidian_embeds(content: &str) -> Cow<'_, str> {
 
 #[tauri::command]
 fn convert_markdown(content: &str) -> String {
-    let processed = process_obsidian_embeds(content);
+    let with_encoded_paths = encode_image_paths(content);
+    let processed = process_obsidian_embeds(&with_encoded_paths);
     
     let mut options = ComrakOptions {
         extension: ComrakExtensionOptions {
